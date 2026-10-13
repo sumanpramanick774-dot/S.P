@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import time
+
 from config import AppConfig, DEFAULT_FNO_UNIVERSE, IST
 from dhan_client import DhanClientWrapper
 from instrument_master import InstrumentManager
@@ -9,12 +11,12 @@ from dashboard_components import build_candlestick_chart, build_rsi_chart, forma
 
 st.set_page_config(page_title="NR4 + EMA20 Live Dashboard", page_icon="⚡", layout="wide")
 
-# ইনস্ট্রুমেন্ট লিস্ট একবারই লোড হবে
+# ইনস্ট্রুমেন্ট লিস্ট লোড
 if "instrument_mgr" not in st.session_state:
     st.session_state.instrument_mgr = InstrumentManager()
     st.session_state.instrument_mgr.fetch_and_build_universe(DEFAULT_FNO_UNIVERSE)
 
-# সাইডবারে আইডি এবং টোকেন দেওয়ার ব্যবস্থা
+# সাইডবারে API লগইন
 with st.sidebar:
     st.title("🔐 API Credentials")
     st.write("আপনার আইডি এবং টোকেন এখানে দিন। অ্যাপ বন্ধ করলে এটি মুছে যাবে।")
@@ -24,7 +26,6 @@ with st.sidebar:
     
     if st.button("Connect API", use_container_width=True):
         if input_id and input_token:
-            # নতুন ক্রেডেনশিয়াল দিয়ে কানেক্ট করা হচ্ছে
             st.session_state.dhan_client = DhanClientWrapper(input_id, input_token)
             st.session_state.data_manager = DataManager(st.session_state.dhan_client, st.session_state.instrument_mgr)
             st.session_state.data_manager.run_daily_scan(DEFAULT_FNO_UNIVERSE)
@@ -50,24 +51,55 @@ with st.sidebar:
         
     selected_symbols = st.multiselect("Active Symbols", DEFAULT_FNO_UNIVERSE, DEFAULT_FNO_UNIVERSE[:10])
 
-# যদি কানেক্ট না করা থাকে, তবে ডেমো মোডে চলবে
+# ডিফল্ট ডেমো মোড সেটআপ
 if "dhan_client" not in st.session_state:
     st.session_state.dhan_client = DhanClientWrapper(None, None)
 if "data_manager" not in st.session_state:
     st.session_state.data_manager = DataManager(st.session_state.dhan_client, st.session_state.instrument_mgr)
     st.session_state.data_manager.run_daily_scan(DEFAULT_FNO_UNIVERSE)
 
-# মেইন ড্যাশবোর্ড
 now_ist = datetime.now(IST).strftime("%A, %d %B %Y | %I:%M:%S %p IST")
 st.subheader("NR4 + EMA20 Multi-Timeframe Dashboard")
 st.caption(f"Clock: {now_ist} | Last Scan: {st.session_state.data_manager.last_update_ts}")
 
 records = []
 stock_details = {}
-for sym in selected_symbols:
-    s = st.session_state.data_manager.process_stock_intraday(sym)
-    stock_details[sym] = s
-    records.append({"Symbol": sym, "NR4": "✅ YES" if s["nr4_qualified"] else "❌ NO", "Daily": s["daily_state"], "5m": s["5m_state"], "15m": s["15m_state"], "30m": s["30m_state"], "1H": s["60m_state"], "Alignment": s["combined_state"], "5m Close": s["5m_close"], "EMA20 Dist %": f"{s['dist_ema20_pct']}%", "5m RSI": s["rsi_5m"], "Futures OI": f"{s['futures_oi']:,}", "OI Chg %": f"{s['oi_change_pct']}%", "OI Trend": s["oi_trend"], "Pullback Alert": s["pullback_state"]})
+
+# Progress Bar এবং Rate Limit Delay যোগ করা হয়েছে
+total_symbols = len(selected_symbols)
+if total_symbols > 0:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, sym in enumerate(selected_symbols):
+        status_text.text(f"Fetching live data for {sym}... ({i+1}/{total_symbols})")
+        
+        s = st.session_state.data_manager.process_stock_intraday(sym)
+        stock_details[sym] = s
+        records.append({
+            "Symbol": sym, 
+            "NR4": "✅ YES" if s["nr4_qualified"] else "❌ NO", 
+            "Daily": s["daily_state"], 
+            "5m": s["5m_state"], 
+            "15m": s["15m_state"], 
+            "30m": s["30m_state"], 
+            "1H": s["60m_state"], 
+            "Alignment": s["combined_state"], 
+            "5m Close": s["5m_close"], 
+            "EMA20 Dist %": f"{s['dist_ema20_pct']}%", 
+            "5m RSI": s["rsi_5m"], 
+            "Futures OI": f"{s['futures_oi']:,}", 
+            "OI Chg %": f"{s['oi_change_pct']}%", 
+            "OI Trend": s["oi_trend"], 
+            "Pullback Alert": s["pullback_state"]
+        })
+        
+        progress_bar.progress((i + 1) / total_symbols)
+        # Dhan API যাতে ব্লক না করে তার জন্য 0.8 সেকেন্ডের বিরতি
+        time.sleep(0.8)
+        
+    status_text.empty()
+    progress_bar.empty()
 
 df_display = pd.DataFrame(records)
 
@@ -77,7 +109,7 @@ c2.metric("Intraday ABOVE", sum(1 for r in records if r["Alignment"] == "ABOVE")
 c3.metric("Intraday BELOW", sum(1 for r in records if r["Alignment"] == "BELOW"))
 c4.metric("Pullback Candidates", sum(1 for r in records if "PULLBACK" in r["Pullback Alert"]))
 
-t1, t2, t3 = st.tabs(["Scanner Matrix", "Pullback Watchlist", "Stock Inspector"])
+t1, t2, t3, t4 = st.tabs(["Scanner Matrix", "Pullback Watchlist", "Stock Inspector", "Data Health & Logs"])
 with t1:
     st.dataframe(df_display.style.map(format_cell_state, subset=["Daily", "5m", "15m", "30m", "1H", "Alignment"]), use_container_width=True)
 with t2:
@@ -93,3 +125,13 @@ with t3:
         if not c_df.empty:
             st.plotly_chart(build_candlestick_chart(c_df, sym_choice), use_container_width=True)
             st.plotly_chart(build_rsi_chart(c_df), use_container_width=True)
+        else:
+            st.warning("Insufficient intraday candles to render candlestick visualization.")
+with t4:
+    st.subheader("Diagnostic Audit")
+    st.json({
+        "API_Connected": st.session_state.dhan_client.is_connected,
+        "Last_API_Error": st.session_state.dhan_client.last_error or "None",
+        "Total_Cash_Mapped": len(st.session_state.instrument_mgr.cash_map),
+        "Total_Futures_Mapped": len(st.session_state.instrument_mgr.futures_map)
+    })
